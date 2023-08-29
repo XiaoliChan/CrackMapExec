@@ -97,6 +97,10 @@ class ssh(connection):
         return
 
     def check_if_admin_sudo(self):
+        if not self.password:
+            self.logger.error("Check admin with sudo not support private key.")
+            return
+        
         if self.args.sudo_check_method:
             method = self.args.sudo_check_method
             self.logger.info(f"Doing sudo check with method: {method}")
