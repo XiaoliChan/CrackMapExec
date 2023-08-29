@@ -53,7 +53,7 @@ class ssh(connection):
         self.conn.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
         try:
-            self.conn.connect(self.host, port=self.args.port)
+            self.conn.connect(self.host, port=self.args.port, timeout=self.args.ssh_timeout)
         except AuthenticationException:
             return True
         except SSHException:
@@ -77,12 +77,12 @@ class ssh(connection):
             "(root)": [True, None], 
             "NOPASSWD: ALL": [True, None],
             "(ALL : ALL) ALL": [True, None],
-            "(sudo)": [False, "Current user was in 'sudo' group, login with the user and use 'sudo -l' to show more details"],
+            "(sudo)": [False, f'Current user: "{self.username}" was in "sudo" group, login with the user and use "sudo -l" to show more details'],
         }
         for keyword in admin_Flag.keys():
             match = re.findall(re.escape(keyword), stdout)
             if match:
-                self.logger.info(f"User: {self.username} matched keyword: {match[0]}")
+                self.logger.info(f'User: "{self.username}" matched keyword: {match[0]}')
                 self.admin_privs = admin_Flag[match[0]][0]
                 if self.admin_privs:
                     #break
@@ -96,13 +96,14 @@ class ssh(connection):
         return
 
     def plaintext_login(self, username, password, private_key=None):
+        self.username = username
+        self.password = password
         try:
             if self.args.key_file or private_key:
                 if private_key:
                     pkey = paramiko.RSAKey.from_private_key(StringIO(private_key))
                 else:
                     pkey = paramiko.RSAKey.from_private_key_file(self.args.key_file)
-
                 self.logger.debug(f"Logging in with key")
                 self.conn.connect(
                     self.host,
@@ -112,6 +113,7 @@ class ssh(connection):
                     pkey=pkey,
                     look_for_keys=False,
                     allow_agent=False,
+                    timeout=self.args.ssh_timeout
                 )
                 if private_key:
                     cred_id = self.db.add_credential(
@@ -138,6 +140,7 @@ class ssh(connection):
                     password=password,
                     look_for_keys=False,
                     allow_agent=False,
+                    timeout=self.args.ssh_timeout
                 )
                 cred_id = self.db.add_credential("plaintext", username, password)
 
