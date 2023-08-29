@@ -173,14 +173,18 @@ class ssh(connection):
             self.client_close()
             return False
 
-    def execute(self, payload=None, output=False):
+    def execute(self, payload=None, get_output=False):
+        if not payload and self.args.execute:
+            payload = self.args.execute
+            if not self.args.no_output:
+                get_output = True
         try:
-            command = payload if payload is not None else self.args.execute
-            stdin, stdout, stderr = self.conn.exec_command(command)
+            stdin, stdout, stderr = self.conn.exec_command(f"{payload} 2>&1")
         except AttributeError:
             return ""
-        if output:
+        if get_output:
             self.logger.success("Executed command")
-            for line in stdout:
-                self.logger.highlight(line.strip())
-            return stdout
+            if get_output:
+                for line in stdout:
+                    self.logger.highlight(line.strip())
+                return stdout
