@@ -4,7 +4,7 @@ import logging
 
 from io import StringIO
 
-import paramiko
+import paramiko, re
 
 from cme.config import process_secret
 from cme.connection import *
@@ -67,18 +67,33 @@ class ssh(connection):
         self.conn.close()
 
     def check_if_admin(self):
+        self.admin_privs = False
         # we could add in another method to check by piping in the password to sudo
         # but that might be too much of an opsec concern - maybe add in a flag to do more checks?
-        stdin, stdout, stderr = self.conn.exec_command("id")
-        if stdout.read().decode("utf-8").find("uid=0(root)") != -1:
-            self.logger.info(f"Determined user is root via `id` command")
-            self.admin_privs = True
-            return True
-        stdin, stdout, stderr = self.conn.exec_command("sudo -ln | grep 'NOPASSWD: ALL'")
-        if stdout.read().decode("utf-8").find("NOPASSWD: ALL") != -1:
-            self.logger.info(f"Determined user is root via `sudo -ln` command")
-            self.admin_privs = True
-            return True
+        self.logger.info(f"Determined user is root via `id && sudo -ln` command")
+        stdin, stdout, stderr = self.conn.exec_command("id && sudo -ln 2>&1")
+        stdout = stdout.read().decode("utf-8")
+        admin_Flag = {
+            "(root)": [True, None], 
+            "NOPASSWD: ALL": [True, None],
+            "(ALL : ALL) ALL": [True, None],
+            "(sudo)": [False, "Current user was in 'sudo' group, login with the user and use 'sudo -l' to show more details"],
+        }
+        for keyword in admin_Flag.keys():
+            match = re.findall(re.escape(keyword), stdout)
+            if match:
+                self.logger.info(f"User: {self.username} matched keyword: {match[0]}")
+                self.admin_privs = admin_Flag[match[0]][0]
+                if self.admin_privs:
+                    #break
+                    break
+                else:
+                    # Continue find admin flag
+                    tips = admin_Flag[match[0]][1]
+                    continue
+        if not self.admin_privs and "tips" in locals():
+            self.logger.display(tips)
+        return
 
     def plaintext_login(self, username, password, private_key=None):
         try:
@@ -129,7 +144,8 @@ class ssh(connection):
             shell_access = False
             host_id = self.db.get_hosts(self.host)[0].id
 
-            if self.check_if_admin():
+            self.check_if_admin()
+            if self.admin_privs:
                 shell_access = True
                 self.logger.debug(f"User {username} logged in successfully and is root!")
                 if self.args.key_file:
@@ -146,7 +162,7 @@ class ssh(connection):
                 stdin, stdout, stderr = self.conn.exec_command("id")
                 output = stdout.read().decode("utf-8")
                 if not output:
-                    self.logger.debug(f"User cannot get a shell")
+                    self.logger.debug(f"User: {self.username} can't get a shell")
                     shell_access = False
                 else:
                     shell_access = True
@@ -156,9 +172,9 @@ class ssh(connection):
             if self.args.key_file:
                 password = f"{password} (keyfile: {self.args.key_file})"
 
-            display_shell_access = f" - shell access!" if shell_access else ""
+            display_shell_access = f'Shell access! {"(root)" if self.admin_privs else "(non root)"}' if shell_access else ""
 
-            self.logger.success(f"{username}:{process_secret(password)} {self.mark_pwned()}{highlight(display_shell_access)}")
+            self.logger.success(f"{username}:{process_secret(password)} {highlight(display_shell_access)} {self.mark_pwned()}")
             return True
         except (
             AuthenticationException,
