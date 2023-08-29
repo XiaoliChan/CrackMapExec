@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import logging
+import paramiko, re, uuid, logging, time
 
 from io import StringIO
-
-import paramiko, re
-
 from cme.config import process_secret
 from cme.connection import *
 from cme.logger import CMEAdapter
@@ -14,7 +11,6 @@ from paramiko.ssh_exception import (
     NoValidConnectionsError,
     SSHException,
 )
-
 
 class ssh(connection):
     def __init__(self, args, db, host):
@@ -68,6 +64,11 @@ class ssh(connection):
 
     def check_if_admin(self):
         self.admin_privs = False
+
+        if self.args.sudo_check:
+            self.check_if_admin_sudo()
+            return
+
         # we could add in another method to check by piping in the password to sudo
         # but that might be too much of an opsec concern - maybe add in a flag to do more checks?
         self.logger.info(f"Determined user is root via `id && sudo -ln` command")
@@ -77,7 +78,7 @@ class ssh(connection):
             "(root)": [True, None], 
             "NOPASSWD: ALL": [True, None],
             "(ALL : ALL) ALL": [True, None],
-            "(sudo)": [False, f'Current user: "{self.username}" was in "sudo" group, login with the user and use "sudo -l" to show more details'],
+            "(sudo)": [False, f'Current user: "{self.username}" was in "sudo" group, please try "--sudo-check" to check if user can run sudo shell'],
         }
         for keyword in admin_Flag.keys():
             match = re.findall(re.escape(keyword), stdout)
@@ -94,6 +95,77 @@ class ssh(connection):
         if not self.admin_privs and "tips" in locals():
             self.logger.display(tips)
         return
+
+    def check_if_admin_sudo(self):
+        if self.args.sudo_check_method:
+            method = self.args.sudo_check_method
+            self.logger.info(f"Doing sudo check with method: {method}")
+           
+        if method == "sudo-stdin":
+            stdin, stdout, stderr = self.conn.exec_command("sudo --help")
+            stdout = stdout.read().decode("utf-8")
+            if "stdin" in stdout:
+                shadow_Backup = f'/tmp/{uuid.uuid4()}'
+                # sudo support stdin password
+                stdin, stdout, stderr = self.conn.exec_command(f"echo {self.password} | sudo -S cp /etc/shadow {shadow_Backup} >/dev/null 2>&1 &")
+                stdin, stdout, stderr = self.conn.exec_command(f"echo {self.password} | sudo -S chmod 777 {shadow_Backup} >/dev/null 2>&1 &")
+                tries = 1
+                while True:
+                    self.logger.info(f"Checking {shadow_Backup} if it existed")
+                    stdin, stdout, stderr = self.conn.exec_command(f'ls {shadow_Backup}')
+                    if tries >= self.args.get_output_tries:
+                        self.logger.info(f'{shadow_Backup} not existed, maybe the pipe has been hanged over, please increase the number of tries with the option "--get-output-tries" or change other method with "--sudo-check-method". If it\'s still failing maybe sudo shell is not working with current user')
+                        break
+                    if stderr.read().decode('utf-8'):
+                        time.sleep(2)
+                        tries +=1
+                    else:
+                        self.logger.info(f"{shadow_Backup} existed")
+                        self.admin_privs = True
+                        break
+                self.logger.info(f"Remove up temporary files")
+                stdin, stdout, stderr = self.conn.exec_command(f"rm -rf {shadow_Backup}")
+            else:
+                self.logger.error("Command: 'sudo' not support stdin mode, running command with 'sudo' failed")
+                return
+        else:
+            stdin, stdout, stderr = self.conn.exec_command("mkfifo --help")
+            stdout = stdout.read().decode("utf-8")
+            # check if user can execute mkfifo
+            if "Create named pipes" in stdout:
+                self.logger.info("Command: 'mkfifo' available")
+                pipe_stdin = f'/tmp/systemd-{uuid.uuid4()}'
+                pipe_stdout = f'/tmp/systemd-{uuid.uuid4()}'
+                shadow_Backup = f'/tmp/{uuid.uuid4()}'
+                stdin, stdout, stderr = self.conn.exec_command(f"mkfifo {pipe_stdin}; tail -f {pipe_stdin} | /bin/sh 2>&1 > {pipe_stdout} >/dev/null 2>&1 &")
+                # 'script -qc /bin/sh /dev/null' means "upgrade" the shell, like reverse shell from netcat
+                stdin, stdout, stderr = self.conn.exec_command(f"echo 'script -qc /bin/sh /dev/null' > {pipe_stdin}")
+                stdin, stdout, stderr = self.conn.exec_command(f"echo 'sudo -s' > {pipe_stdin} && echo '{self.password}' > {pipe_stdin}")
+                # Sometime the pipe will hanging(only happen with paramiko)
+                # Can't get "whoami" or "id" result in pipe_stdout, maybe something wrong using pipe with paramiko
+                # But one thing I can confirm, is the command was executed even can't get result from pipe_stdout
+                tries = 1
+                self.logger.info(f"Copy /etc/shadow to {shadow_Backup} if pass the sudo auth")
+                while True:
+                    self.logger.info(f"Checking {shadow_Backup} if it existed")
+                    stdin, stdout, stderr = self.conn.exec_command(f'ls {shadow_Backup}')
+                    if tries >= self.args.get_output_tries:
+                        self.logger.info(f'{shadow_Backup} not existed, maybe the pipe has been hanged over, please increase the number of tries with the option "--get-output-tries" or change other method with "--sudo-check-method". If it\'s still failing maybe sudo shell is not working with current user')
+                        break
+
+                    if stderr.read().decode('utf-8'):
+                        time.sleep(2)
+                        stdin, stdout, stderr = self.conn.exec_command(f"echo 'cp /etc/shadow {shadow_Backup} && chmod 777 {shadow_Backup}' > {pipe_stdin}")
+                        tries += 1
+                    else:
+                        self.logger.info(f"{shadow_Backup} existed")
+                        self.admin_privs = True
+                        break
+                self.logger.info(f"Remove up temporary files")
+                stdin, stdout, stderr = self.conn.exec_command(f"rm -rf {shadow_Backup} {pipe_stdin} {pipe_stdout}")
+            else:
+                self.logger.error("Command: 'mkfifo' unavailable, running command with 'sudo' failed")
+                return
 
     def plaintext_login(self, username, password, private_key=None):
         self.username = username
