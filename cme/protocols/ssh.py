@@ -16,7 +16,8 @@ class ssh(connection):
     def __init__(self, args, db, host):
         self.protocol = "SSH"
         self.remote_version = None
-        self.server_os = None
+        self.server_os_platform = "Linux"
+        self.user_principal = "root"
         super().__init__(args, db, host)
 
     def proto_logger(self):
@@ -37,12 +38,7 @@ class ssh(connection):
     def enum_host_info(self):
         self.remote_version = self.conn._transport.remote_version
         self.logger.debug(f"Remote version: {self.remote_version}")
-        self.server_os = ""
-        if self.args.remote_enum:
-            stdin, stdout, stderr = self.conn.exec_command("uname -r")
-            self.server_os = stdout.read().decode("utf-8")
-            self.logger.debug(f"OS retrieved: {self.server_os}")
-        self.db.add_host(self.host, self.args.port, self.remote_version, os=self.server_os)
+        self.db.add_host(self.host, self.args.port, self.remote_version)
 
     def create_conn_obj(self):
         self.conn = paramiko.SSHClient()
@@ -73,7 +69,7 @@ class ssh(connection):
         # but that might be too much of an opsec concern - maybe add in a flag to do more checks?
         self.logger.info(f"Determined user is root via `id && sudo -ln` command")
         stdin, stdout, stderr = self.conn.exec_command("id && sudo -ln 2>&1")
-        stdout = stdout.read().decode("utf-8")
+        stdout = stdout.read().decode("utf-8", errors="ignore")
         admin_Flag = {
             "(root)": [True, None], 
             "NOPASSWD: ALL": [True, None],
@@ -107,7 +103,7 @@ class ssh(connection):
            
         if method == "sudo-stdin":
             stdin, stdout, stderr = self.conn.exec_command("sudo --help")
-            stdout = stdout.read().decode("utf-8")
+            stdout = stdout.read().decode("utf-8", errors="ignore")
             if "stdin" in stdout:
                 shadow_Backup = f'/tmp/{uuid.uuid4()}'
                 # sudo support stdin password
@@ -134,7 +130,7 @@ class ssh(connection):
                 return
         else:
             stdin, stdout, stderr = self.conn.exec_command("mkfifo --help")
-            stdout = stdout.read().decode("utf-8")
+            stdout = stdout.read().decode("utf-8", errors="ignore")
             # check if user can execute mkfifo
             if "Create named pipes" in stdout:
                 self.logger.info("Command: 'mkfifo' available")
@@ -222,38 +218,49 @@ class ssh(connection):
 
             shell_access = False
             host_id = self.db.get_hosts(self.host)[0].id
+            
+            output = None
 
-            self.check_if_admin()
-            if self.admin_privs:
-                shell_access = True
-                self.logger.debug(f"User {username} logged in successfully and is root!")
-                if self.args.key_file:
-                    self.db.add_admin_user("key", username, password, host_id=host_id, cred_id=cred_id)
-                else:
-                    self.db.add_admin_user(
-                        "plaintext",
-                        username,
-                        password,
-                        host_id=host_id,
-                        cred_id=cred_id,
-                    )
+            stdin, stdout, stderr = self.conn.exec_command("id")
+            output = stdout.read().decode("utf-8", errors="ignore")
+
+            if stderr.read().decode('utf-8', errors="ignore"):
+                stdin, stdout, stderr = self.conn.exec_command("whoami /priv")
+                output = stdout.read().decode("utf-8", errors="ignore")
+                self.server_os_platform = "Windows"
+                if "SeDebugPrivilege" in output:
+                    self.admin_privs = True
+                    self.user_principal = "admin"
+
+            if not output:
+                self.logger.debug(f"User: {self.username} can't get a shell")
+                shell_access = False
             else:
-                stdin, stdout, stderr = self.conn.exec_command("id")
-                output = stdout.read().decode("utf-8")
-                if not output:
-                    self.logger.debug(f"User: {self.username} can't get a shell")
-                    shell_access = False
-                else:
-                    shell_access = True
+                shell_access = True
+
+            if shell_access and self.server_os_platform == "Linux":
+                self.check_if_admin()
+                if self.admin_privs:
+                    self.logger.debug(f"User {username} logged in successfully and is root!")
+                    if self.args.key_file:
+                        self.db.add_admin_user("key", username, password, host_id=host_id, cred_id=cred_id)
+                    else:
+                        self.db.add_admin_user(
+                            "plaintext",
+                            username,
+                            password,
+                            host_id=host_id,
+                            cred_id=cred_id,
+                        )
 
             self.db.add_loggedin_relation(cred_id, host_id, shell=shell_access)
 
             if self.args.key_file:
                 password = f"{password} (keyfile: {self.args.key_file})"
 
-            display_shell_access = f'Shell access! {"(root)" if self.admin_privs else "(non root)"}' if shell_access else ""
+            display_shell_access = f'Shell access! {f"({self.user_principal})" if self.admin_privs else f"(non {self.user_principal})"}' if shell_access else ""
 
-            self.logger.success(f"{username}:{process_secret(password)} {highlight(display_shell_access)} {self.mark_pwned()}")
+            self.logger.success(f"{username}:{process_secret(password)} {highlight(display_shell_access)} {highlight(self.server_os_platform)} {self.mark_pwned()}")
             return True
         except (
             AuthenticationException,
