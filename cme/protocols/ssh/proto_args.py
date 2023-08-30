@@ -10,7 +10,5 @@ def proto_args(parser, std_parser, module_parser):
     cgroup = ssh_parser.add_argument_group("Command Execution", "Options for executing commands")
     cgroup.add_argument("--no-output", action="store_true", help="do not retrieve command output")
     cgroup.add_argument("-x", metavar="COMMAND", dest="execute", help="execute the specified command")
-    cgroup.add_argument("--remote-enum", action="store_true", help="executes remote commands for enumeration")
-    
 
     return parser
