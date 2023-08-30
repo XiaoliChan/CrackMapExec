@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import paramiko, re, uuid, logging, time
+import paramiko, re, uuid, logging, time, sys
 
 from io import StringIO
 from cme.config import process_secret
@@ -36,8 +36,17 @@ class ssh(connection):
         return True
 
     def enum_host_info(self):
-        self.remote_version = self.conn._transport.remote_version
-        self.logger.debug(f"Remote version: {self.remote_version}")
+        try:
+            # Why need this?
+            # Default will raise exception from paramiko if can't get ssh banner
+            current=sys.stdout
+            sys.stdout = StringIO()
+            self.remote_version = self.conn._transport.remote_version
+            sys.stdout = current
+            self.logger.debug(f"Remote version: {self.remote_version}")
+        except Exception as e:
+            self.logger.debug(str(e))
+            self.remote_version = "Unknown version"
         self.db.add_host(self.host, self.args.port, self.remote_version)
 
     def create_conn_obj(self):
