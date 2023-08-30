@@ -228,9 +228,15 @@ class ssh(connection):
                 stdin, stdout, stderr = self.conn.exec_command("whoami /priv")
                 output = stdout.read().decode("utf-8", errors="ignore")
                 self.server_os_platform = "Windows"
+                self.user_principal = "admin"
                 if "SeDebugPrivilege" in output:
                     self.admin_privs = True
-                    self.user_principal = "admin"
+                elif "SeUndockPrivilege" in output:
+                    self.admin_privs = True
+                    self.user_principal = "admin (UAC)"
+                else:
+                    # non admin (low priv)
+                    self.user_principal = "admin (low priv)"
 
             if not output:
                 self.logger.debug(f"User: {self.username} can't get a shell")
