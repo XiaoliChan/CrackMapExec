@@ -33,6 +33,7 @@ class ssh(connection):
                     self.call_modules()
                 else:
                     self.call_cmd_args()
+                self.conn.close()
 
     def proto_logger(self):
         self.logger = CMEAdapter(
@@ -287,9 +288,8 @@ class ssh(connection):
             display_shell_access = f'Shell access! {f"({self.user_principal})" if self.admin_privs else f"(non {self.user_principal})"}' if shell_access else ""
             self.logger.success(f"{username}:{process_secret(password)} {highlight(display_shell_access)} {highlight(self.server_os_platform)} {self.mark_pwned()}")
             
-            self.conn.close()
             return True
-
+    
     def execute(self, payload=None, get_output=False):
         if not payload and self.args.execute:
             payload = self.args.execute
