@@ -15,10 +15,24 @@ from paramiko.ssh_exception import (
 class ssh(connection):
     def __init__(self, args, db, host):
         self.protocol = "SSH"
-        self.remote_version = None
+        self.remote_version = ""
         self.server_os_platform = "Linux"
         self.user_principal = "root"
         super().__init__(args, db, host)
+    
+    def proto_flow(self):
+        self.proto_logger()
+        if self.create_conn_obj():
+            self.enum_host_info()
+            self.print_host_info()
+            if not self.remote_version:
+                self.conn.close()
+                return
+            if self.login():
+                if hasattr(self.args, "module") and self.args.module:
+                    self.call_modules()
+                else:
+                    self.call_cmd_args()
 
     def proto_logger(self):
         self.logger = CMEAdapter(
@@ -29,28 +43,21 @@ class ssh(connection):
                 "hostname": self.hostname,
             }
         )
-        logging.getLogger("paramiko").setLevel(logging.WARNING)
 
     def print_host_info(self):
-        self.logger.display(self.remote_version)
+        self.logger.display(self.remote_version if self.remote_version else "Unknown SSH version, skipping...")
         return True
 
     def enum_host_info(self):
-        # Why need this?
-        # Default will raise exception from paramiko if can't get ssh banner
-        current=sys.stdout
-        sys.stdout = StringIO()
         self.remote_version = self.conn._transport.remote_version
-        sys.stdout = current
-        if not self.remote_version:
-            self.remote_version = "Unknown SSH version"
-        self.logger.debug(f"Remote version: {self.remote_version}")
-        self.db.add_host(self.host, self.args.port, self.remote_version)
+        self.logger.debug(f'Remote version: {self.remote_version if self.remote_version else "Unknown SSH Version"}')
+        self.db.add_host(self.host, self.args.port, self.remote_version if self.remote_version else "Unknown SSH Version")
 
     def create_conn_obj(self):
+        logging.getLogger("paramiko").disabled = True
+        logging.getLogger("paramiko.transport").disabled = True
         self.conn = paramiko.SSHClient()
         self.conn.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
         try:
             self.conn.connect(self.host, port=self.args.port, timeout=self.args.ssh_timeout)
         except AuthenticationException:
@@ -61,9 +68,6 @@ class ssh(connection):
             return False
         except socket.error:
             return False
-
-    def client_close(self):
-        self.conn.close()
 
     def check_if_admin(self):
         self.admin_privs = False
@@ -175,61 +179,70 @@ class ssh(connection):
                 return
 
     def plaintext_login(self, username, password, private_key=None):
+        self.ssh_sessions = True
         self.username = username
         self.password = password
-        try:
-            if self.args.key_file or private_key:
-                if private_key:
-                    pkey = paramiko.RSAKey.from_private_key(StringIO(private_key))
-                else:
-                    pkey = paramiko.RSAKey.from_private_key_file(self.args.key_file)
-                self.logger.debug(f"Logging in with key")
-                self.conn.connect(
-                    self.host,
-                    port=self.args.port,
-                    username=username,
-                    passphrase=password if password != "" else None,
-                    pkey=pkey,
-                    look_for_keys=False,
-                    allow_agent=False,
-                    timeout=self.args.ssh_timeout
-                )
-                if private_key:
-                    cred_id = self.db.add_credential(
-                        "key",
-                        username,
-                        password if password != "" else "",
-                        key=private_key,
-                    )
-                else:
-                    with open(self.args.key_file, "r") as f:
-                        key_data = f.read()
-                    cred_id = self.db.add_credential(
-                        "key",
-                        username,
-                        password if password != "" else "",
-                        key=key_data,
-                    )
+        pkey = ""
+        cred_id = self.db.add_credential("plaintext", username, password)
+        if self.args.key_file or private_key:
+            self.logger.debug(f"Logging in with key")
+            if private_key:
+                pkey = paramiko.RSAKey.from_private_key(StringIO(private_key))
             else:
-                self.logger.debug(f"Logging in with password")
-                self.conn.connect(
-                    self.host,
-                    port=self.args.port,
-                    username=username,
-                    password=password,
-                    look_for_keys=False,
-                    allow_agent=False,
-                    timeout=self.args.ssh_timeout
-                )
-                cred_id = self.db.add_credential("plaintext", username, password)
+                pkey = paramiko.RSAKey.from_private_key_file(self.args.key_file)
 
+            password = f"(keydata: {private_key})" if private_key else f"(keyfile: {self.args.key_file})"
+
+            try:
+                self.conn._transport.auth_publickey(username, pkey)
+            except (AuthenticationException, SSHException) as e:
+                self.ssh_sessions = False
+                self.logger.fail(f"{username}:{password} {e}")
+                self.conn.close()
+
+            if private_key:
+                cred_id = self.db.add_credential(
+                    "key",
+                    username,
+                    "",
+                    key=private_key,
+                )
+            else:
+                with open(self.args.key_file, "r") as f:
+                    key_data = f.read()
+                cred_id = self.db.add_credential(
+                    "key",
+                    username,
+                    "",
+                    key=key_data,
+                )
+        
+        else:
+            self.logger.debug(f"Logging {self.host} with username: {self.username}, password: {self.password}")
+            try:
+                self.conn._transport.auth_password(username, password, fallback=True)
+            except (AuthenticationException, SSHException) as e:
+                self.ssh_sessions = False
+                self.logger.fail(f"{username}:{process_secret(password)} {e}")
+                self.conn.close()
+        
+        if not self.ssh_sessions:
+            return False
+        else:
             shell_access = False
             host_id = self.db.get_hosts(self.host)[0].id
             
             output = None
-
-            stdin, stdout, stderr = self.conn.exec_command("id")
-            output = stdout.read().decode("utf-8", errors="ignore")
+            
+            # Some IOT devices will not raise exception in self.conn._transport.auth_password / self.conn._transport.auth_publickey
+            try:
+                stdin, stdout, stderr = self.conn.exec_command("id")
+                output = stdout.read().decode("utf-8", errors="ignore")
+            except Exception as e:
+                self.conn.close()
+                self.logger.debug(str(e))
+                self.logger.fail(f"{username}:{process_secret(password) if not pkey else password} {e}")
+                return False
 
             if stderr.read().decode('utf-8', errors="ignore"):
                 stdin, stdout, stderr = self.conn.exec_command("whoami /priv")
@@ -269,24 +282,13 @@ class ssh(connection):
             self.db.add_loggedin_relation(cred_id, host_id, shell=shell_access)
 
             if self.args.key_file:
-                password = f"{password} (keyfile: {self.args.key_file})"
+                password = f"(keyfile: {self.args.key_file})"
 
             display_shell_access = f'Shell access! {f"({self.user_principal})" if self.admin_privs else f"(non {self.user_principal})"}' if shell_access else ""
-
             self.logger.success(f"{username}:{process_secret(password)} {highlight(display_shell_access)} {highlight(self.server_os_platform)} {self.mark_pwned()}")
+            
+            self.conn.close()
             return True
-        except (
-            AuthenticationException,
-            NoValidConnectionsError,
-            ConnectionResetError,
-        ) as e:
-            self.logger.fail(f"{username}:{process_secret(password)} {e}")
-            self.client_close()
-            return False
-        except Exception as e:
-            self.logger.exception(e)
-            self.client_close()
-            return False
 
     def execute(self, payload=None, get_output=False):
         if not payload and self.args.execute:
