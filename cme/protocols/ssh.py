@@ -180,86 +180,69 @@ class ssh(connection):
                 return
 
     def plaintext_login(self, username, password, private_key=None):
-        self.ssh_sessions = True
         self.username = username
         self.password = password
         pkey = ""
+        stdout = None
+        stderr = None
         cred_id = self.db.add_credential("plaintext", username, password)
-        if self.args.key_file or private_key:
-            self.logger.debug(f"Logging in with key")
-            if private_key:
-                pkey = paramiko.RSAKey.from_private_key(StringIO(private_key))
-            else:
-                pkey = paramiko.RSAKey.from_private_key_file(self.args.key_file)
+        try:
+            if self.args.key_file or private_key:
+                self.logger.debug(f"Logging in with key")
+                if private_key:
+                    pkey = paramiko.RSAKey.from_private_key(StringIO(private_key))
+                else:
+                    pkey = paramiko.RSAKey.from_private_key_file(self.args.key_file)
 
-            password = f"(keydata: {private_key})" if private_key else f"(keyfile: {self.args.key_file})"
-
-            try:
+                password = f"(keydata: {private_key})" if private_key else f"(keyfile: {self.args.key_file})"
                 self.conn._transport.auth_publickey(username, pkey)
-            except (AuthenticationException, SSHException) as e:
-                self.ssh_sessions = False
-                self.logger.fail(f"{username}:{password} {e}")
-                self.conn.close()
-
-            if private_key:
-                cred_id = self.db.add_credential(
-                    "key",
-                    username,
-                    "",
-                    key=private_key,
-                )
+                if private_key:
+                    cred_id = self.db.add_credential(
+                        "key",
+                        username,
+                        "",
+                        key=private_key,
+                    )
+                else:
+                    with open(self.args.key_file, "r") as f:
+                        key_data = f.read()
+                    cred_id = self.db.add_credential(
+                        "key",
+                        username,
+                        "",
+                        key=key_data,
+                    )
             else:
-                with open(self.args.key_file, "r") as f:
-                    key_data = f.read()
-                cred_id = self.db.add_credential(
-                    "key",
-                    username,
-                    "",
-                    key=key_data,
-                )
-        
-        else:
-            self.logger.debug(f"Logging {self.host} with username: {self.username}, password: {self.password}")
-            try:
+                self.logger.debug(f"Logging {self.host} with username: {self.username}, password: {self.password}")
                 self.conn._transport.auth_password(username, password, fallback=True)
-            except (AuthenticationException, SSHException) as e:
-                self.ssh_sessions = False
-                self.logger.fail(f"{username}:{process_secret(password)} {e}")
-                self.conn.close()
-        
-        if not self.ssh_sessions:
+
+            # Some IOT devices will not raise exception in self.conn._transport.auth_password / self.conn._transport.auth_publickey
+            stdin, stdout, stderr = self.conn.exec_command("id")
+            stdout = stdout.read().decode("utf-8", errors="ignore")
+            stderr = stderr.read().decode('utf-8', errors="ignore")
+        except Exception as e:
+            self.logger.fail(f"{username}:{process_secret(password) if not pkey else password} {e}")
+            self.conn.close()
             return False
         else:
             shell_access = False
             host_id = self.db.get_hosts(self.host)[0].id
-            
-            output = None
-            
-            # Some IOT devices will not raise exception in self.conn._transport.auth_password / self.conn._transport.auth_publickey
-            try:
-                stdin, stdout, stderr = self.conn.exec_command("id")
-                output = stdout.read().decode("utf-8", errors="ignore")
-            except Exception as e:
-                self.conn.close()
-                self.logger.debug(str(e))
-                self.logger.fail(f"{username}:{process_secret(password) if not pkey else password} {e}")
-                return False
 
-            if stderr.read().decode('utf-8', errors="ignore"):
+            if stderr:
                 stdin, stdout, stderr = self.conn.exec_command("whoami /priv")
-                output = stdout.read().decode("utf-8", errors="ignore")
+                stdout = stdout.read().decode("utf-8", errors="ignore")
                 self.server_os_platform = "Windows"
                 self.user_principal = "admin"
-                if "SeDebugPrivilege" in output:
+                if "SeDebugPrivilege" in stdout:
                     self.admin_privs = True
-                elif "SeUndockPrivilege" in output:
+                elif "SeUndockPrivilege" in stdout:
                     self.admin_privs = True
                     self.user_principal = "admin (UAC)"
                 else:
                     # non admin (low priv)
                     self.user_principal = "admin (low priv)"
 
-            if not output:
+            if not stdout:
                 self.logger.debug(f"User: {self.username} can't get a shell")
                 shell_access = False
             else:
