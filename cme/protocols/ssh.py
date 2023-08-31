@@ -219,7 +219,6 @@ class ssh(connection):
             # Some IOT devices will not raise exception in self.conn._transport.auth_password / self.conn._transport.auth_publickey
             stdin, stdout, stderr = self.conn.exec_command("id")
             stdout = stdout.read().decode("utf-8", errors="ignore")
-            stderr = stderr.read().decode('utf-8', errors="ignore")
         except Exception as e:
             self.logger.fail(f"{username}:{process_secret(password) if not pkey else password} {e}")
             self.conn.close()
@@ -228,7 +227,7 @@ class ssh(connection):
             shell_access = False
             host_id = self.db.get_hosts(self.host)[0].id
 
-            if stderr:
+            if not stdout:
                 stdin, stdout, stderr = self.conn.exec_command("whoami /priv")
                 stdout = stdout.read().decode("utf-8", errors="ignore")
                 self.server_os_platform = "Windows"
@@ -243,7 +242,8 @@ class ssh(connection):
                     self.user_principal = "admin (low priv)"
 
             if not stdout:
-                self.logger.debug(f"User: {self.username} can't get a shell")
+                self.logger.debug(f"User: {self.username} can't get a basic shell")
+                self.server_os_platform = "Network Devices"
                 shell_access = False
             else:
                 shell_access = True
