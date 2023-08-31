@@ -36,17 +36,15 @@ class ssh(connection):
         return True
 
     def enum_host_info(self):
-        try:
-            # Why need this?
-            # Default will raise exception from paramiko if can't get ssh banner
-            current=sys.stdout
-            sys.stdout = StringIO()
-            self.remote_version = self.conn._transport.remote_version
-            sys.stdout = current
-            self.logger.debug(f"Remote version: {self.remote_version}")
-        except Exception as e:
-            self.logger.debug(str(e))
-            self.remote_version = "Unknown version"
+        # Why need this?
+        # Default will raise exception from paramiko if can't get ssh banner
+        current=sys.stdout
+        sys.stdout = StringIO()
+        self.remote_version = self.conn._transport.remote_version
+        sys.stdout = current
+        if not self.remote_version:
+            self.remote_version = "Unknown SSH version"
+        self.logger.debug(f"Remote version: {self.remote_version}")
         self.db.add_host(self.host, self.args.port, self.remote_version)
 
     def create_conn_obj(self):
