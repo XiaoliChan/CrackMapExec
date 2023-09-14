@@ -25,7 +25,7 @@ crackmapexec = 'cme.crackmapexec:main'
 cmedb = 'cme.cmedb:main'
 
 [tool.poetry.dependencies]
-python = "^3.7.0"
+python = ">=3.11,<4.0.0"
 requests = ">=2.27.1"
 beautifulsoup4 = ">=4.11,<5"
 lsassy = ">=3.1.8"
@@ -33,9 +33,9 @@ termcolor = "^1.1.0"
 msgpack = "^1.0.0"
 neo4j = "^4.1.1"
 pylnk3 = "^0.4.2"
-pypsrp = "^0.7.0"
+pypsrp = { git = "https://github.com/jborean93/pypsrp", branch = "master" }
 paramiko = "=3.3.1"
-impacket =  { git = "https://github.com/XiaoliChan/impacket.git", branch = "gkdi" }
+impacket =  { git = "https://github.com/mpgn/impacket.git", branch = "gkdi" }
 dsinternals = "^1.2.4"
 xmltodict = "^0.12.0"
 terminaltables = "^3.1.0"
